@@ -17,13 +17,15 @@ public abstract class BaseServer<T> implements Server<T> {
     private ServerSocket sock;
     private ConnectionsImpl  connectionHandlers;
     private int conId;
+    public UserInfosPro userSys = new UserInfosPro();
     public BaseServer(int port, Supplier<BidiMessagingProtocol<T>> protocolFactory, Supplier<MessageEncoderDecoder<T>> encdecFactory) {
         connectionHandlers = new ConnectionsImpl();
         this.port = port;
         this.protocolFactory = protocolFactory;
         this.encdecFactory = encdecFactory;
-		this.sock = null;
+        this.sock = null;
         conId = 0;
+
     }
 
     @Override
@@ -31,7 +33,7 @@ public abstract class BaseServer<T> implements Server<T> {
         // ושהפרוטוקולים יאותחלו כמו שצריך
 
         try (ServerSocket serverSock = new ServerSocket(port)) {
-			System.out.println("Server started");
+            System.out.println("Server started");
 
             this.sock = serverSock; //just to be able to close
 
@@ -39,13 +41,17 @@ public abstract class BaseServer<T> implements Server<T> {
 
                 Socket clientSock = serverSock.accept();
 
+                BidiMessagingProtocol<T> prot= protocolFactory.get();
+
                 BlockingConnectionHandler<T> handler = new BlockingConnectionHandler<>(
                         clientSock,
                         encdecFactory.get(),
-                        protocolFactory.get());
+                        prot,
+                        connectionHandlers);
                 connectionHandlers.connect(conId, (ConnectionHandler<byte[]>) handler);
-
+                prot.start(conId, (Connections<T>)connectionHandlers,userSys);
                 execute(handler);
+                //handler.run();
                 conId++;
             }
         } catch (IOException ex) {
@@ -56,8 +62,8 @@ public abstract class BaseServer<T> implements Server<T> {
 
     @Override
     public void close() throws IOException {
-		if (sock != null)
-			sock.close();
+        if (sock != null)
+            sock.close();
     }
 
     protected abstract void execute(BlockingConnectionHandler<T>  handler);

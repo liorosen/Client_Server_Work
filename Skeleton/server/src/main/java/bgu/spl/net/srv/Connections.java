@@ -9,4 +9,6 @@ public interface Connections<T> {
     boolean send(int connectionId, T msg);
 
     void disconnect(int connectionId);
+
+    ConnectionHandler<byte[]> getHandler(int connectionId);
 }

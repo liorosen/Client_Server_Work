@@ -1,79 +1,176 @@
 package bgu.spl.net.impl.tftp;
-import bgu.spl.net.api.MessagingProtocol;
 
 import java.io.*;
-import java.rmi.server.Skeleton;
+import java.net.Socket;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Scanner;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 
 public class TftpClient {
     //TODO: implement the main logic of the client, when using a thread per client the main logic goes here
     private static final int PORT = 7777;
-//    private static String directoryPath = "C:/Users/lioro/IdeaProjects/ServerSpl3/Skeleton/server/Flies";
+
     private static final String SERVER_IP = "localhost";
 
-    private static final TftpClientProtocol protocol = new TftpClientProtocol();
+    //private static final TftpClientProtocol protocol = new TftpClientProtocol();
     private static final  LineMessageClientEncoderDecoder encdec = new  LineMessageClientEncoderDecoder();
+    static Boolean discDone = false;
+    static Boolean connected=true;
+    static Boolean shouldDisc=false;
+    static String readFileName="";
+    static String writeFileName="";
+    static Boolean isWritingToServer=false;
+    static Boolean isReadingFromServer=false;
 
-    private static void helperRRQ(String readFilename, BufferedReader in){
-        String data = new String();
-        String fin = "\n";
-        String nextMessage = null;
+    private static boolean getBytesLastMessgae( byte [] last_message){
+        if(last_message[0] != 0
+                || last_message[1] != 3
+                || last_message[2] != 0
+                || last_message[3] != 0){return true;}
+        return false;
+    }
 
-        try {
-            nextMessage = encdec.decodeNextByte((byte) (in.read()));
-        } catch (IOException ex) {
-            throw new RuntimeException(ex);
+    private static byte[] helperRRQ(byte[] nextMessage, byte[] data, int counter, int blockNum, DataOutputStream out)
+    {
+        if((short) ((((short) (nextMessage[4] & 0xFF)) << 8 | (short) (nextMessage[5] & 0xFF)))==1)
+        {
+            System.out.println("The file " + readFileName + " accepted");
+            data=new byte[0];
+            counter=0;
+            blockNum=1;
         }
-        while (nextMessage == null) {
-            protocol.process(nextMessage);
-            try {
-                FileWriter file = new FileWriter(readFilename);
-                file.write(data);
-                file.close();
-                System.out.println("RRQ " + readFilename + " complete");
-            } catch (IOException ex) {
-                throw new RuntimeException(ex);
+            short dataLength=(short) (((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF));
+            byte[] new_data=new byte[data.length+dataLength];
+            System.arraycopy(data, 0, new_data, 0, data.length);
+            System.arraycopy(nextMessage, 6, new_data, data.length, dataLength);
+            data = new_data;
+            counter=data.length;
+            sendACK(out, blockNum);
+            
+        
+        if((short) (((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF))<512)
+        {
+            isReadingFromServer=false;
+            fileWriting(readFileName, data);
+            System.out.println("RRQ " + readFileName + " complete");
+            readFileName="";
+            data=new byte[0];
+            blockNum=1;
+            counter=0;
+        }
+
+        return data;
+    }
+
+
+    private static void fileWriting(String readFileName, byte[] data){
+        //try (FileOutputStream fos = new FileOutputStream("client/" + readFileName)) {
+        try (FileOutputStream fos = new FileOutputStream(readFileName)) {
+            fos.write(data);
+        }catch (IOException ex) {
+            System.out.println("Error");
+        }
+    }
+
+    private static int helperWRQ(byte[] nextMessage, byte[] dataToServer, int bufferWRQ, int counterWRQ, DataOutputStream out)
+    {
+        int blockSize = Math.min(dataToServer.length - bufferWRQ, 512);
+        byte[] blockData = Arrays.copyOfRange(dataToServer, bufferWRQ, bufferWRQ + blockSize);
+        byte[] temp = createDataPacket(counterWRQ, blockData);
+        //counterWRQ++;
+        bufferWRQ+=blockSize;
+        if(blockData.length<512)
+        {
+            counterWRQ=1;
+            bufferWRQ=0;
+            isWritingToServer=false;
+        }
+        sendPacket(temp, out);
+
+        return bufferWRQ;
+    }
+
+    private static byte[] helperDIRQ(byte[] nextMessage, byte[] data, int counter, int blockNum, DataOutputStream out)
+    {
+        if((short) ((((short) (nextMessage[4] & 0xFF)) << 8 | (short) (nextMessage[5] & 0xFF)))==1)
+        {
+            data=new byte[0];
+            counter=0;
+            blockNum=1;
+        }
+            short dataLength=(short) (((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF));
+            byte[] new_data=new byte[data.length+dataLength];
+            System.arraycopy(data, 0, new_data, 0, data.length);
+            System.arraycopy(nextMessage, 6, new_data, data.length, dataLength);
+            data = new_data;
+            counter=data.length;
+            sendACK(out, blockNum);
+            
+        
+        if((short) (((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF))<512)
+        {
+            filesPrint(data);
+            data=new byte[0];
+            blockNum=1;
+            counter=0;
+        }
+
+        return data;
+    }
+
+    private static void filesPrint(byte[] data) {
+        //String readFileName="";
+        byte[] readFileName = new byte[data.length];
+        int counter=0;
+        for(int i=0;i<data.length;i++)
+        {
+            if(data[i] == 0)
+            {
+                System.out.println(new String(readFileName));
+                readFileName = new byte[data.length];
+                counter=0;
+            }
+            else
+            {
+                readFileName[counter]=data[i];
+                counter++;
             }
         }
     }
 
-
-    public static void helpFunc (String opcode , TftpClient client , BufferedReader reader , String line, BufferedWriter out, BufferedReader in)  {
-        switch (opcode) {
+    public static void helpFunc (String[] parts , TftpClient client , BufferedReader reader , String line, DataOutputStream out, DataInputStream in)  {
+        switch (parts[0]) {
             //--------------------------------------------------
+            //LOGRQ
             case "LOGRQ":
-                System.out.print("Enter username: ");
-                String username = null;
-                try {
-                    username = reader.readLine().trim();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                client.sendLoginRequest(username,out);
-                System.out.println("Wait for answer");
-                break;
+                //System.out.print("Enter username:");
+                String username = parts[1];
+                sendLoginRequest(username,out);
+                // Construct the LOGRQ packet
+               //String packetString = "LOGRQ " + username;
+               //System.out.println(packetString);
+
+               break;
             //--------------------------------------------------
+            //DELRQ
             case "DELRQ":
-                System.out.print("Enter filename to delete: ");
-                String deleteFilename = null;
-                try {
-                    deleteFilename = reader.readLine().trim();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                client.sendDeleteRequest(deleteFilename,out);
+                String deletereadFileName = parts[1];
+                sendDeleteRequest(deletereadFileName,out);
+
                 break;
             //--------------------------------------------------
+            //RRQ
             case "RRQ":
-                System.out.print("Enter filename to read: ");
-                String readFilename = null;
+                String _readFileName = parts[1];
+                readFileName=_readFileName;
+                //System.out.println("Your readFileName is: " + _readFileName);
                 try {
-                    readFilename = reader.readLine().trim();
-                    FileReader file = new FileReader(readFilename);
+
+                    //FileReader file = new FileReader( "client/" + _readFileName);
+                    FileReader file = new FileReader(_readFileName);
 
                     // File already exists, handle this case appropriately
                     System.out.println("Error: File already exists locally");
@@ -83,33 +180,47 @@ public class TftpClient {
                 } catch (FileNotFoundException e) {
 
                     // File doesn't exist locally, request it from the client
-                    client.sendReadWriteRequest(readFilename, true, out);
-
+                    sendReadWriteRequest(_readFileName, true, out);
                     //read until file complete.
-                     helperRRQ(readFilename, in);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
-
+                //System.out.println("The file " + _readFileName + " accepted");
                 break;
             //--------------------------------------------------
+            //WRQ
             case "WRQ":
-                System.out.print("Enter filename to write: ");
-                String writeFilename = null;
+                String _writeFileName = parts[1];
+                writeFileName=_writeFileName;
                 try {
-                    writeFilename = reader.readLine().trim();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    //FileReader file = new FileReader( "client/" + _writeFileName);
+                    FileReader file = new FileReader(_writeFileName);
+                    // File does exist locally, request it from the client
+                    sendReadWriteRequest(_writeFileName, false, out);
+
+
+                } catch (FileNotFoundException e) {
+
+                    
+                    // File does not exists, handle this case appropriately
+                    System.out.println("Error: File does not exists locally");
+                    return;
                 }
-                client.sendReadWriteRequest(writeFilename, false , out);
+                //System.out.println("The file " + readFileName + " is being uploaded");
                 break;
             //--------------------------------------------------
+            // DIRQ
             case "DIRQ":
-                client.sendDirListingRequest(out);
+                sendDirListingRequest(out);
+                //helperDIRQ(in);
                 break;
-
+            //--------------------------------------------------
+           // case "DISC":
+                //sendDisconnect(out);
+                //break;
+            //--------------------------------------------------
             default:
-                System.out.println("Illegal TFTP operation – Unknown Opcode: " + opcode);
+                System.out.println("Illegal TFTP operation - Unknown Opcode: " + parts[0]);
                 try {
                     sendMessage(out, line);
                 } catch (IOException e) {
@@ -119,40 +230,178 @@ public class TftpClient {
         }
     }
 
+    private static void handleBCAST(byte[] packet) {
+        if(packet[1]==9)
+        {
+            int startIndex = 3; // Starting index of the part you want to convert
+            byte endByte = 10; // Byte indicating the end of the part you want to convert
+
+            // Find the index of the endByte
+            int endIndex = startIndex;
+            while (endIndex < packet.length && packet[endIndex] != endByte) {
+                endIndex++;
+            }
+            String file = new String(packet, startIndex, endIndex - startIndex, StandardCharsets.UTF_8);
+
+            if(packet[2]==1)
+            {
+                System.out.println("The file: " + file + " was added to the server");
+            }
+            else if(packet[2]==0)
+            {
+                System.out.println("The file: " + file + " was deleted from the server");
+            }
+        }
+    }
+
+    private static boolean getACK(byte[] packet) {
+        //check if ack or error
+        //if ack of exit
+        //if error, error
+        //nextMessage
+        short ackNum = (short) (((short) (packet[2] & 0xFF)) << 8 | (short) (packet[3] & 0xFF));
+        System.out.println("Recieved ACK " + ackNum);
+        return true;
+    }
+
+    private static byte[] createDataPacket(int blockNumber, byte[] data) {
+        byte[] packet = new byte[data.length + 6];
+        packet[0] = 0; // Opcode for DATA
+        packet[1] = 3; // Opcode value for DATA
+        packet[2] = (byte) ((data.length >> 8) & 0xFF); // High byte of data length
+        packet[3] = (byte) (data.length & 0xFF); // Low byte of data length
+        packet[4] = (byte) ((blockNumber >> 8) & 0xFF); // High byte of block number
+        packet[5] = (byte) (blockNumber & 0xFF); // Low byte of block number
+        System.arraycopy(data, 0, packet, 6, data.length);
+        return packet;
+    }
+
     public static void main(String[] args) {
         try (Socket socket = new Socket(SERVER_IP, PORT)) { // establishes a socket connection to the server using the IP address and port number specified.
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));       //  creates an input stream to receive data from the server over the socket connection.
-            BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));       //  creates a BufferedReader object to read input from the keyboard.
-            BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+//            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));       //  creates an input stream to receive data from the server over the socket connection.
+//            BufferedWriter out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+            DataOutputStream out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
 
+            BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));       //  creates a BufferedReader object to read input from the keyboard.
+            //System.out.println(System.getProperty("user.dir"));
             TftpClient client = new TftpClient();
 
             Thread keyboardThread = new Thread(() -> {      //  creates a new thread for reading input from the keyboard.
                 try {
                     String line;
-                    while ((line = reader.readLine().toUpperCase()) != null) {
-                        if (line.equals("DISC")) {
-                            client.sendDisconnect(out);
-                            break;
-                        }
+                    while (( line = reader.readLine()) != null && !shouldDisc) {
                         String[] parts = line.split(" ", 2);
-                        String opcode = parts[0].toUpperCase();
-                        helpFunc(opcode, client, reader, line, out , in);
+                        parts[0] = parts[0].toUpperCase();
+                        if (parts[0].equals("DISC")) {
+                            sendDisconnect(out);
+                            if(discDone ) {
+                            	break;
+                            }
+                        }
+
+                        //String opcode = parts[0].toUpperCase();
+                        // if(parts.length == 1){
+                        //     System.out.println("Please insert valid command ");
+                        //     continue;
+                        // }
+                        helpFunc(parts, client, reader, line, out , in);
                     }
-                    client.sendDisconnect(out);
+                    //sendDisconnect(out);
                     sendMessage(out, line);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
             });
 
-            Thread serverThread = new Thread(() -> {       // creates a new thread for receiving messages from the server.
+            Thread serverMessageThread = new Thread(() -> {
                 try {
-                    char[] buf = new char[512];
-                    int len;
-                    while ((len = in.read(buf)) != -1) {
-                        String msg = new String(buf, 0, len);
-                        System.out.println(msg);
+                    byte[] data= null;
+                    byte[] dataToServer=null;
+                    int counterWRQ=0;
+                    int counter=0;
+                    int blockNum=1;
+                    int bufferWRQ=0;
+                    while (!shouldDisc) {
+                        byte[] nextMessage = null;
+                        encdec.switch_mode(true);
+                        try {
+                            while (in.available() > 0) {
+                                nextMessage = encdec.decodeNextByte((byte) in.read());
+                            }
+                        } finally {
+                            while(nextMessage==null)
+                                nextMessage = encdec.decodeNextByte((byte) '\n');
+                            encdec.switch_mode(false);
+                        }
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+                        if(nextMessage[1]==3)
+                        {
+                            if((short) ((((short) (nextMessage[4] & 0xFF)) << 8 | (short) (nextMessage[5] & 0xFF)))==1)
+                                blockNum=1;
+                            if(isReadingFromServer)
+                            {
+                                data = helperRRQ(nextMessage, data, counter, blockNum, out);
+                                blockNum++;
+                            }
+                            else
+                            {
+                                data = helperDIRQ(nextMessage, data, counter, blockNum, out);
+                                blockNum++;
+                            }
+                        }
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+                        if(nextMessage[1]==4)
+                        {
+                        	discDone = true;
+                            getACK(nextMessage);
+                            if(isWritingToServer)
+                            {
+                                if((short) ((((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF)))==0)
+                                {
+                                    //String filePath = "client/" + writeFileName;
+                                    String filePath =writeFileName;
+                                    try {
+                                        FileInputStream fileReader =new FileInputStream(filePath);
+                                        byte[] fileContent = new byte[fileReader.available()];
+                                        fileReader.read(fileContent);
+                                        fileReader.close();
+                                        dataToServer=fileContent;
+                                            
+                                    } catch (FileNotFoundException e) {
+                                        throw new RuntimeException(e);
+                                    } catch (IOException e) {
+                                        throw new RuntimeException(e);
+                                    }
+                                    System.out.println("The file " + readFileName + " is being uploaded");
+                                    counterWRQ=1;
+                                    bufferWRQ = 0;
+                                }
+                                bufferWRQ = helperWRQ(nextMessage, dataToServer, bufferWRQ, counterWRQ, out);
+                                counterWRQ++;
+                            }
+                            else if((short) ((((short) (nextMessage[2] & 0xFF)) << 8 | (short) (nextMessage[3] & 0xFF)))>0)
+                            {
+                                System.out.println("WRQ " + writeFileName + " complete");
+                                writeFileName="";
+                            }
+                            if(!connected)
+                            {
+                                shouldDisc=true;
+                            }
+                        }
+///////////////////////////////////////////////////////////////////////////////////////////////////////                                 
+                        if(nextMessage[1]==5)
+                        {
+                            handleERROR(nextMessage);
+                            connected=true;
+                        }
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+                        if(nextMessage[1]==9)
+                        {
+                            handleBCAST(nextMessage);
+                            
+                        }
                     }
                 } catch (IOException e) {
                     e.printStackTrace();
@@ -160,70 +409,113 @@ public class TftpClient {
             });
 
             keyboardThread.start();
-            serverThread.start();
+            serverMessageThread.start();
 
             keyboardThread.join();
-            serverThread.join();
+            serverMessageThread.join();
+
         } catch (IOException | InterruptedException e) {
             e.printStackTrace();
         }
     }
 
-    private static void sendMessage(BufferedWriter out, String message) throws IOException {
-        out.write(new String(message.getBytes(StandardCharsets.UTF_8)));
+    private static void handleERROR(byte[] packet) {
+        int startIndex = 4; // Starting index of the part you want to convert
+        byte endByte = 10; // Byte indicating the end of the part you want to convert
+
+        // Find the index of the endByte
+        int endIndex = startIndex;
+        while (endIndex < packet.length && packet[endIndex] != endByte) {
+            endIndex++;
+        }
+        String error = new String(packet, startIndex, endIndex - startIndex, StandardCharsets.UTF_8);
+        System.out.println(error);
+        isWritingToServer=false;
+        isReadingFromServer=false;
+    }
+
+    private static void sendMessage(DataOutputStream out, String message) throws IOException {
+        out.write(message.getBytes(StandardCharsets.UTF_8));
         out.flush();
     }
 
     // Method to construct and send a Login Request (LOGRQ) packet
-    public void sendLoginRequest(String username , BufferedWriter out) {
-        String packet = "LOGRQ " + username + "\0";
+    public static void sendLoginRequest(String username , DataOutputStream out) {
+        byte[] pack = new byte[2];
+        pack[0] = 0;
+        pack[1] = 7;
+        String packet = new String(pack) + "" + username + "\0" +  "\n";
         sendPacket(packet.getBytes(StandardCharsets.UTF_8), out);
     }
 
     // Method to construct and send a Delete File Request (DELRQ) packet
-    public void sendDeleteRequest(String filename , BufferedWriter out) {
-        String packet = "DELRQ " + filename + "\0";
+    public static void sendDeleteRequest(String readFileName , DataOutputStream out) {
+        byte[] pack = new byte[2];
+        pack[0] = 0;
+        pack[1] = 8;
+        String packet = new String(pack) + readFileName+  "\0" +  "\n";
         sendPacket(packet.getBytes(StandardCharsets.UTF_8), out);
     }
 
     // Method to construct and send a Read Request (RRQ) or Write Request (WRQ) packet
-    public void sendReadWriteRequest(String filename, boolean isRead,BufferedWriter out) {
-        String opcode = isRead ? "RRQ" : "WRQ";
-        String packet = opcode + " " + filename + "\0";
+    public static void sendReadWriteRequest(String readFileName, boolean isRead,DataOutputStream out) {
+        byte[] pack = new byte[2];
+        pack[0] = 0;
+        if(isRead)
+        {
+            isReadingFromServer=true;
+            pack[1] = 1;
+        }
+        else
+        {
+            isWritingToServer=true;
+            pack[1] = 2;
+        }
+            String packet = new String(pack) + readFileName+  "\0" +  "\n";
         sendPacket(packet.getBytes(StandardCharsets.UTF_8), out);
     }
 
     // Method to construct and send a Directory Listing Request (DIRQ) packet
-    public void sendDirListingRequest(BufferedWriter out) {
-        String packet = "DIRQ\0";
+    public static void sendDirListingRequest(DataOutputStream out) {
+        byte[] pack = new byte[2];
+        pack[0] = 0;
+        pack[1] = 6;
+        String packet = new String(pack) +  "\0" +  "\n";
         sendPacket(packet.getBytes(StandardCharsets.UTF_8), out);
     }
 
     // Method to construct and send a Disconnect (DISC) packet
-    public void sendDisconnect(BufferedWriter out) {
-        String packet = "DISC\0";
+    public static void sendDisconnect(DataOutputStream out) {
+        byte[] pack = new byte[2];
+        pack[0] = 0;
+        pack[1] = 10;
+        String packet = new String(pack) + "\0" + "\n";
         sendPacket(packet.getBytes(StandardCharsets.UTF_8), out);
+        connected=false;
+        //sendPacket(pack, out);
+    }
+
+    public static void sendACK(DataOutputStream out, int blockNum) {
+        byte[] pack = new byte[4];
+        pack[0] = 0;
+        pack[1] = 4;
+        pack[2] = (byte) ((blockNum >> 8) & 0xFF);
+        pack[3] = (byte) (blockNum & 0xFF);
+        //String packet = new String(pack);
+        System.out.println("Sent Ack " + blockNum);
+        sendPacket(pack, out);
     }
 
     // Method to send a generic packet (assuming it's already constructed)
-    private void sendPacket(byte[] packet, BufferedWriter out) {
+    private static void sendPacket(byte[] packet, DataOutputStream out) {
         try {
-            out.write(new String(packet));
-            out.newLine();
+            out.write(packet);
             out.flush();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
     }
-
-
-
-
-
-
-
-
 }
 
 

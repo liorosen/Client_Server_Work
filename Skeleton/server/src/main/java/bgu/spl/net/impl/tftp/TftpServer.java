@@ -19,7 +19,8 @@ public class TftpServer extends BaseServer<byte[]> {
     protected void execute(BlockingConnectionHandler<byte[]> handler) {
         // The handler will start automatically and execute the communication logic
         // between the server and the client according to the provided protocol.
-        handler.run();
+        //handler.run();
+        new Thread(handler).start();
     }
 
     public static void main(String[] args) {
